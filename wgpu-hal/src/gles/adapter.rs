@@ -184,7 +184,7 @@ impl super::Adapter {
 
         log::info!("Vendor: {}", vendor);
         log::info!("Renderer: {}", renderer);
-        log::info!("Version: {}", version);
+        log::info!("Version: {}", &version);
 
         log::debug!("Extensions: {:#?}", extensions);
 
@@ -192,25 +192,42 @@ impl super::Adapter {
 
         let shading_language_version = {
             let sl_version = gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION);
-            log::info!("SL version: {}", sl_version);
+            log::info!("SL version: {}", &sl_version);
             let (sl_major, sl_minor) = Self::parse_version(&sl_version).ok()?;
             let value = sl_major as u16 * 100 + sl_minor as u16 * 10;
             naga::back::glsl::Version::Embedded(value)
         };
 
-        let vertex_shader_storage_blocks =
-            gl.get_parameter_i32(glow::MAX_VERTEX_SHADER_STORAGE_BLOCKS) as u32;
-        let fragment_shader_storage_blocks =
-            gl.get_parameter_i32(glow::MAX_FRAGMENT_SHADER_STORAGE_BLOCKS) as u32;
+        let vertex_shader_storage_blocks = if cfg!(target_arch = "wasm32") {
+            // TODO: find out actual value
+            0
+        } else {
+            gl.get_parameter_i32(glow::MAX_VERTEX_SHADER_STORAGE_BLOCKS) as u32
+        };
+        let fragment_shader_storage_blocks = if cfg!(target_arch = "wasm32") {
+            // TODO: find out actual value
+            0
+        } else {
+            gl.get_parameter_i32(glow::MAX_FRAGMENT_SHADER_STORAGE_BLOCKS) as u32
+        };
 
-        let vertex_shader_storage_textures =
-            gl.get_parameter_i32(glow::MAX_VERTEX_IMAGE_UNIFORMS) as u32;
-        let fragment_shader_storage_textures =
-            gl.get_parameter_i32(glow::MAX_FRAGMENT_IMAGE_UNIFORMS) as u32;
+        let vertex_shader_storage_textures = if cfg!(target_arch = "wasm32") {
+            // TODO: find out actual value
+            8
+        } else {
+            gl.get_parameter_i32(glow::MAX_VERTEX_IMAGE_UNIFORMS) as u32
+        };
+        let fragment_shader_storage_textures = if cfg!(target_arch = "wasm32") {
+            8
+        } else {
+            gl.get_parameter_i32(glow::MAX_FRAGMENT_IMAGE_UNIFORMS) as u32
+        };
 
-        // WORKAROUND:
-        // In order to work around an issue with GL on RPI4 and similar, we ignore a zero vertex ssbo count if there are vertex sstos. (more info: https://github.com/gfx-rs/wgpu/pull/1607#issuecomment-874938961)
-        // The hardware does not want us to write to these SSBOs, but GLES cannot express that. We detect this case and disable writing to SSBOs.
+        // WORKAROUND: In order to work around an issue with GL on RPI4 and similar, we ignore a
+        // zero vertex ssbo count if there are vertex sstos. (more info:
+        // https://github.com/gfx-rs/wgpu/pull/1607#issuecomment-874938961) The hardware does not
+        // want us to write to these SSBOs, but GLES cannot express that. We detect this case and
+        // disable writing to SSBOs.
         let vertex_ssbo_false_zero =
             vertex_shader_storage_blocks == 0 && vertex_shader_storage_textures != 0;
 
@@ -226,6 +243,19 @@ impl super::Adapter {
             fragment_shader_storage_textures
         } else {
             vertex_shader_storage_textures.min(fragment_shader_storage_textures)
+        };
+
+        let max_vertex_buffer_array_stride = if cfg!(target_arch = "wasm32") {
+            255 // https://www.khronos.org/registry/webgl/specs/latest/1.0/index.html#VERTEX_STRIDE
+        } else {
+            gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIB_STRIDE) as u32
+        };
+
+        let max_vertex_buffers = if cfg!(target_arch = "wasm32") {
+            // TODO: Not sure what the max vertex buffer count is for WebGL
+            8
+        } else {
+            gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIB_BINDINGS) as u32
         };
 
         let mut features = wgt::Features::empty()
@@ -261,6 +291,14 @@ impl super::Adapter {
             ver >= (3, 2) || extensions.contains("GL_EXT_draw_buffers_indexed"),
         );
 
+        if cfg!(not(target_arch = "wasm32"))
+            && (ver >= (3, 1)
+                || extensions.contains("GL_ARB_buffer_storage")
+                || extensions.contains("GL_EXT_buffer_storage"))
+        {
+            downlevel_flags.set(wgt::DownlevelFlags::STORAGE_RESOURCES, true);
+        }
+
         let max_texture_size = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) as u32;
         let max_texture_3d_size = gl.get_parameter_i32(glow::MAX_3D_TEXTURE_SIZE) as u32;
 
@@ -281,8 +319,11 @@ impl super::Adapter {
             max_texture_dimension_3d: max_texture_3d_size,
             max_texture_array_layers: gl.get_parameter_i32(glow::MAX_ARRAY_TEXTURE_LAYERS) as u32,
             max_bind_groups: crate::MAX_BIND_GROUPS as u32,
-            max_dynamic_uniform_buffers_per_pipeline_layout: max_uniform_buffers_per_shader_stage,
-            max_dynamic_storage_buffers_per_pipeline_layout: max_storage_buffers_per_shader_stage,
+            // FIXME: !!!
+            // max_dynamic_uniform_buffers_per_pipeline_layout: max_uniform_buffers_per_shader_stage,
+            // max_dynamic_storage_buffers_per_pipeline_layout: max_storage_buffers_per_shader_stage,
+            max_dynamic_uniform_buffers_per_pipeline_layout: 8,
+            max_dynamic_storage_buffers_per_pipeline_layout: 4,
             max_sampled_textures_per_shader_stage: super::MAX_TEXTURE_SLOTS as u32,
             max_samplers_per_shader_stage: super::MAX_SAMPLERS as u32,
             max_storage_buffers_per_shader_stage,
@@ -295,11 +336,10 @@ impl super::Adapter {
             } else {
                 0
             } as u32,
-            max_vertex_buffers: gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIB_BINDINGS) as u32,
+            max_vertex_buffers,
             max_vertex_attributes: (gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIBS) as u32)
                 .min(super::MAX_VERTEX_ATTRIBUTES as u32),
-            max_vertex_buffer_array_stride: gl.get_parameter_i32(glow::MAX_VERTEX_ATTRIB_STRIDE)
-                as u32,
+            max_vertex_buffer_array_stride,
             max_push_constant_size: 0,
         };
 
@@ -317,6 +357,12 @@ impl super::Adapter {
             super::PrivateCapabilities::VERTEX_BUFFER_LAYOUT,
             ver >= (3, 1),
         );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        private_caps.set(super::PrivateCapabilities::INDEX_BUFFER_ROLE_CHANGE, true);
+
+        #[cfg(target_arch = "wasm32")]
+        private_caps.set(super::PrivateCapabilities::EMULATE_BUFFER_MAP, true);
 
         let mut workarounds = super::Workarounds::empty();
         let r = renderer.to_lowercase();
@@ -337,6 +383,7 @@ impl super::Adapter {
         let downlevel_defaults = wgt::DownlevelLimits {};
 
         // Drop the GL guard so we can move the context into AdapterShared
+        #[cfg(not(target_arch = "wasm32"))]
         drop(gl);
 
         Some(crate::ExposedAdapter {
@@ -344,6 +391,7 @@ impl super::Adapter {
                 shared: Arc::new(super::AdapterShared {
                     context,
                     private_caps,
+                    downlevel_flags,
                     workarounds,
                     shading_language_version,
                 }),
@@ -448,6 +496,7 @@ impl crate::Adapter<super::Api> for super::Adapter {
                 zero_buffer,
                 temp_query_results: Vec::new(),
                 draw_buffer_count: 1,
+                current_index_buffer: None,
             },
         })
     }
@@ -547,11 +596,13 @@ impl crate::Adapter<super::Api> for super::Adapter {
                 formats: if surface.enable_srgb {
                     vec![
                         wgt::TextureFormat::Rgba8UnormSrgb,
+                        #[cfg(not(target_arch = "wasm32"))]
                         wgt::TextureFormat::Bgra8UnormSrgb,
                     ]
                 } else {
                     vec![
                         wgt::TextureFormat::Rgba8Unorm,
+                        #[cfg(not(target_arch = "wasm32"))]
                         wgt::TextureFormat::Bgra8Unorm,
                     ]
                 },
@@ -575,6 +626,12 @@ impl crate::Adapter<super::Api> for super::Adapter {
         }
     }
 }
+
+// SAFE: WASM doesn't have threads
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for super::Adapter {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for super::Adapter {}
 
 #[cfg(test)]
 mod tests {

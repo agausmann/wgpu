@@ -4505,6 +4505,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         {
             self.poll_devices::<hal::api::Dx11>(force_wait, &mut callbacks)?;
         }
+        #[cfg(gl)]
+        {
+            self.poll_devices::<hal::api::Gles>(force_wait, &mut callbacks)?;
+        }
 
         fire_map_callbacks(callbacks);
 

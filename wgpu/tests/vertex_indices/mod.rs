@@ -131,11 +131,15 @@ fn pulling_common(
 
 #[test]
 fn draw() {
-    initialize_test(TestParameters::default().test_features(), |ctx| {
-        pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
-            cmb.draw(0..6, 0..1);
-        })
-    })
+    initialize_test(
+        TestParameters::default().test_features(),
+        |_| wgt::Limits::downlevel_defaults(),
+        |ctx| {
+            pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
+                cmb.draw(0..6, 0..1);
+            })
+        },
+    )
 }
 
 #[test]
@@ -144,6 +148,7 @@ fn draw_vertex_offset() {
         TestParameters::default()
             .test_features()
             .backend_failure(wgpu::Backends::DX11),
+        |_| wgt::Limits::downlevel_defaults(),
         |ctx| {
             pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
                 cmb.draw(0..3, 0..1);
@@ -155,11 +160,15 @@ fn draw_vertex_offset() {
 
 #[test]
 fn draw_instanced() {
-    initialize_test(TestParameters::default().test_features(), |ctx| {
-        pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
-            cmb.draw(0..3, 0..2);
-        })
-    })
+    initialize_test(
+        TestParameters::default().test_features(),
+        |_| wgt::Limits::downlevel_defaults(),
+        |ctx| {
+            pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
+                cmb.draw(0..3, 0..2);
+            })
+        },
+    )
 }
 
 #[test]
@@ -168,6 +177,7 @@ fn draw_instanced_offset() {
         TestParameters::default()
             .test_features()
             .backend_failure(wgpu::Backends::DX11),
+        |_| wgt::Limits::downlevel_defaults(),
         |ctx| {
             pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
                 cmb.draw(0..3, 0..1);

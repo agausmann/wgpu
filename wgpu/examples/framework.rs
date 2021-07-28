@@ -40,8 +40,16 @@ pub trait Example: 'static + Sized {
     fn required_features() -> wgpu::Features {
         wgpu::Features::empty()
     }
-    fn required_limits() -> wgpu::Limits {
-        wgpu::Limits::downlevel_defaults() // These downlevel limits will allow the code to run on all possible hardware
+    fn required_downlevel_capabilities() -> wgpu::DownlevelCapabilities {
+        wgpu::DownlevelCapabilities {
+            flags: wgpu::DownlevelFlags::empty(),
+            shader_model: wgpu::ShaderModel::Sm5,
+            ..wgpu::DownlevelCapabilities::default()
+        }
+    }
+    fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        let _ = adapter;
+        wgpu::Limits::downlevel_webgl2_defaults() // These downlevel limits will allow the code to run on all possible hardware
     }
     fn init(
         sc_desc: &wgpu::SwapChainDescriptor,
@@ -95,7 +103,12 @@ async fn setup<E: Example>(title: &str) -> Setup {
     #[cfg(target_arch = "wasm32")]
     {
         use winit::platform::web::WindowExtWebSys;
-        console_log::init().expect("could not initialize logger");
+        let query_string = web_sys::window().unwrap().location().search().unwrap();
+        let level: log::Level = parse_url_query_string(&query_string, "RUST_LOG")
+            .map(|x| x.parse().ok())
+            .flatten()
+            .unwrap_or(log::Level::Info);
+        console_log::init_with_level(level).expect("could not initialize logger");
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
         // On wasm, append the canvas to the document body
         web_sys::window()
@@ -110,7 +123,7 @@ async fn setup<E: Example>(title: &str) -> Setup {
 
     log::info!("Initializing the surface...");
 
-    let backend = wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::PRIMARY);
+    let backend = wgpu::util::backend_bits_from_env().unwrap_or_else(wgpu::Backends::all);
 
     let instance = wgpu::Instance::new(backend);
     let (size, surface) = unsafe {
@@ -137,8 +150,23 @@ async fn setup<E: Example>(title: &str) -> Setup {
         required_features - adapter_features
     );
 
+    let required_downlevel_capabilities = E::required_downlevel_capabilities();
+    let downlevel_capabilities = adapter.get_downlevel_properties();
+    assert!(
+        downlevel_capabilities.shader_model >= required_downlevel_capabilities.shader_model,
+        "Adapter does not support the minimum shader model required to run this example: {:?}",
+        required_downlevel_capabilities.shader_model
+    );
+    assert!(
+        downlevel_capabilities
+            .flags
+            .contains(required_downlevel_capabilities.flags),
+        "Adapter does not support the downlevel capabilities required to run this example: {:?}",
+        required_downlevel_capabilities.flags - downlevel_capabilities.flags
+    );
+
     // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
-    let needed_limits = E::required_limits().using_resolution(adapter.limits());
+    let needed_limits = E::required_limits(&adapter).using_resolution(adapter.limits());
 
     let trace_dir = std::env::var("WGPU_TRACE");
     let (device, queue) = adapter
@@ -378,6 +406,25 @@ pub fn run<E: Example>(title: &str) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+/// Parse the query string as returned by `web_sys::window()?.location().search()?` and get a
+/// specific key out of it.
+pub fn parse_url_query_string<'a>(query: &'a str, search_key: &str) -> Option<&'a str> {
+    let query_string = query.strip_prefix("?")?;
+
+    for pair in query_string.split("&") {
+        let mut pair = pair.split("=");
+        let key = pair.next()?;
+        let value = pair.next()?;
+
+        if key == search_key {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 pub struct FrameworkRefTest {
     pub image_path: &'static str,
@@ -397,12 +444,10 @@ pub fn test<E: Example>(mut params: FrameworkRefTest) {
     assert_eq!(params.width % 64, 0, "width needs to be aligned 64");
 
     let features = E::required_features() | params.optional_features;
-    let limits = E::required_limits();
 
     test_common::initialize_test(
-        mem::take(&mut params.base_test_parameters)
-            .features(features)
-            .limits(limits),
+        mem::take(&mut params.base_test_parameters).features(features),
+        |adapter| E::required_limits(adapter),
         |ctx| {
             let spawner = Spawner::new();
 

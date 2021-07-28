@@ -78,7 +78,7 @@ impl super::Device {
         gl: &glow::Context,
         shader: &str,
         naga_stage: naga::ShaderStage,
-        label: Option<&str>,
+        #[cfg_attr(target_arch = "wasm32", allow(unused))] label: Option<&str>,
     ) -> Result<glow::Shader, crate::PipelineError> {
         let target = match naga_stage {
             naga::ShaderStage::Vertex => glow::VERTEX_SHADER,
@@ -87,6 +87,7 @@ impl super::Device {
         };
 
         let raw = gl.create_shader(target).unwrap();
+        #[cfg(not(target_arch = "wasm32"))]
         if gl.supports_debug() {
             gl.object_label(glow::SHADER, raw, label);
         }
@@ -165,9 +166,10 @@ impl super::Device {
         gl: &glow::Context,
         shaders: I,
         layout: &super::PipelineLayout,
-        label: crate::Label,
+        #[cfg_attr(target_arch = "wasm32", allow(unused))] label: Option<&str>,
     ) -> Result<super::PipelineInner, crate::PipelineError> {
         let program = gl.create_program().unwrap();
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(label) = label {
             if gl.supports_debug() {
                 gl.object_label(glow::PROGRAM, program, Some(label));
@@ -320,26 +322,46 @@ impl crate::Device<super::Api> for super::Device {
             .contains(crate::MemoryFlags::PREFER_COHERENT);
         let mut map_flags = 0;
 
-        if is_host_visible {
-            map_flags |= glow::MAP_PERSISTENT_BIT;
-            if is_coherent {
-                map_flags |= glow::MAP_COHERENT_BIT;
-            }
-        }
-        if desc.usage.contains(crate::BufferUses::MAP_READ) {
-            map_flags |= glow::MAP_READ_BIT;
-        }
-        if desc.usage.contains(crate::BufferUses::MAP_WRITE) {
-            map_flags |= glow::MAP_WRITE_BIT;
-        }
-
         let raw = gl.create_buffer().unwrap();
         gl.bind_buffer(target, Some(raw));
         let raw_size = desc
             .size
             .try_into()
             .map_err(|_| crate::DeviceError::OutOfMemory)?;
-        gl.buffer_storage(target, raw_size, None, map_flags);
+
+        if self
+            .shared
+            .downlevel_flags
+            .contains(wgt::DownlevelFlags::STORAGE_RESOURCES)
+        {
+            if is_host_visible {
+                map_flags |= glow::MAP_PERSISTENT_BIT;
+                if is_coherent {
+                    map_flags |= glow::MAP_COHERENT_BIT;
+                }
+            }
+            if desc.usage.contains(crate::BufferUses::MAP_READ) {
+                map_flags |= glow::MAP_READ_BIT;
+            }
+            if desc.usage.contains(crate::BufferUses::MAP_WRITE) {
+                map_flags |= glow::MAP_WRITE_BIT;
+            }
+
+            gl.buffer_storage(target, raw_size, None, map_flags);
+        } else {
+            assert!(!is_coherent);
+            let usage = if is_host_visible {
+                if desc.usage.contains(crate::BufferUses::MAP_READ) {
+                    glow::STREAM_READ
+                } else {
+                    glow::DYNAMIC_DRAW
+                }
+            } else {
+                glow::STATIC_DRAW
+            };
+            gl.buffer_data_size(target, raw_size, usage);
+        }
+
         gl.bind_buffer(target, None);
 
         if !is_coherent && desc.usage.contains(crate::BufferUses::MAP_WRITE) {
@@ -347,6 +369,7 @@ impl crate::Device<super::Api> for super::Device {
         }
         //TODO: do we need `glow::MAP_UNSYNCHRONIZED_BIT`?
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(label) = desc.label {
             if gl.supports_debug() {
                 gl.object_label(glow::BUFFER, raw, Some(label));
@@ -358,6 +381,8 @@ impl crate::Device<super::Api> for super::Device {
             target,
             size: desc.size,
             map_flags,
+            #[cfg(target_arch = "wasm32")]
+            emulate_map_allocation: Default::default(),
         })
     }
     unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
@@ -374,14 +399,41 @@ impl crate::Device<super::Api> for super::Device {
 
         let is_coherent = buffer.map_flags & glow::MAP_COHERENT_BIT != 0;
 
-        gl.bind_buffer(buffer.target, Some(buffer.raw));
-        let ptr = gl.map_buffer_range(
-            buffer.target,
-            range.start as i32,
-            (range.end - range.start) as i32,
-            buffer.map_flags,
-        );
-        gl.bind_buffer(buffer.target, None);
+        let ptr = if self
+            .shared
+            .private_caps
+            .contains(super::PrivateCapabilities::EMULATE_BUFFER_MAP)
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ptr: *mut u8 = if let Some(ptr) = buffer.emulate_map_allocation.get().as_ref() {
+                    *ptr
+                } else {
+                    let ptr =
+                        Box::into_raw(vec![0; buffer.size as usize].into_boxed_slice()) as *mut u8;
+                    buffer.emulate_map_allocation.set(Some(ptr));
+                    ptr
+                };
+
+                ptr.offset(range.start as isize)
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            unimplemented!(
+                "map_buffer() is not implemented for native platforms that do not support it"
+            );
+        } else {
+            gl.bind_buffer(buffer.target, Some(buffer.raw));
+            let ptr = gl.map_buffer_range(
+                buffer.target,
+                range.start as i32,
+                (range.end - range.start) as i32,
+                buffer.map_flags,
+            );
+            gl.bind_buffer(buffer.target, None);
+
+            ptr
+        };
 
         Ok(crate::BufferMapping {
             ptr: ptr::NonNull::new(ptr).ok_or(crate::DeviceError::Lost)?,
@@ -391,7 +443,26 @@ impl crate::Device<super::Api> for super::Device {
     unsafe fn unmap_buffer(&self, buffer: &super::Buffer) -> Result<(), crate::DeviceError> {
         let gl = &self.shared.context.lock();
         gl.bind_buffer(buffer.target, Some(buffer.raw));
-        gl.unmap_buffer(buffer.target);
+
+        if self
+            .shared
+            .private_caps
+            .contains(super::PrivateCapabilities::EMULATE_BUFFER_MAP)
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ptr = buffer.emulate_map_allocation.take().unwrap();
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, buffer.size as usize));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            unimplemented!(
+                "unmap_buffer() is not implemented for native plaforms that do not support it"
+            );
+        } else {
+            gl.unmap_buffer(buffer.target);
+        }
+
         gl.bind_buffer(buffer.target, None);
         Ok(())
     }
@@ -402,11 +473,35 @@ impl crate::Device<super::Api> for super::Device {
         let gl = &self.shared.context.lock();
         gl.bind_buffer(buffer.target, Some(buffer.raw));
         for range in ranges {
-            gl.flush_mapped_buffer_range(
-                buffer.target,
-                range.start as i32,
-                (range.end - range.start) as i32,
-            );
+            if self
+                .shared
+                .private_caps
+                .contains(super::PrivateCapabilities::EMULATE_BUFFER_MAP)
+            {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let ptr = buffer
+                        .emulate_map_allocation
+                        .get()
+                        .expect("Buffer not mapped");
+                    let slice = std::slice::from_raw_parts_mut(
+                        ptr.offset(range.start as isize),
+                        buffer.size as usize,
+                    );
+                    gl.buffer_sub_data_u8_slice(buffer.target, range.start as i32, slice);
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                unimplemented!(
+                    "flush_mapped_ranges() not implemented for native targets that do not support it"
+                );
+            } else {
+                gl.flush_mapped_buffer_range(
+                    buffer.target,
+                    range.start as i32,
+                    (range.end - range.start) as i32,
+                );
+            }
         }
     }
     unsafe fn invalidate_mapped_ranges<I>(&self, _buffer: &super::Buffer, _ranges: I) {
@@ -447,6 +542,7 @@ impl crate::Device<super::Api> for super::Device {
                 );
             }
 
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(label) = desc.label {
                 if gl.supports_debug() {
                     gl.object_label(glow::RENDERBUFFER, raw, Some(label));
@@ -525,6 +621,7 @@ impl crate::Device<super::Api> for super::Device {
                 }
             };
 
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(label) = desc.label {
                 if gl.supports_debug() {
                     gl.object_label(glow::TEXTURE, raw, Some(label));
@@ -659,6 +756,7 @@ impl crate::Device<super::Api> for super::Device {
             );
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(label) = desc.label {
             if gl.supports_debug() {
                 gl.object_label(glow::SAMPLER, raw, Some(label));
@@ -946,11 +1044,11 @@ impl crate::Device<super::Api> for super::Device {
         gl.delete_program(pipeline.inner.program);
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(unused))]
     unsafe fn create_query_set(
         &self,
         desc: &wgt::QuerySetDescriptor<crate::Label>,
     ) -> Result<super::QuerySet, crate::DeviceError> {
-        use std::fmt::Write;
         let gl = &self.shared.context.lock();
         let mut temp_string = String::new();
 
@@ -959,7 +1057,10 @@ impl crate::Device<super::Api> for super::Device {
             let query = gl
                 .create_query()
                 .map_err(|_| crate::DeviceError::OutOfMemory)?;
+            #[cfg(not(target_arch = "wasm32"))]
             if gl.supports_debug() {
+                use std::fmt::Write;
+
                 if let Some(label) = desc.label {
                     temp_string.clear();
                     let _ = write!(temp_string, "{}[{}]", label, i);
@@ -999,6 +1100,7 @@ impl crate::Device<super::Api> for super::Device {
         &self,
         fence: &super::Fence,
     ) -> Result<crate::FenceValue, crate::DeviceError> {
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::needless_borrow))]
         Ok(fence.get_latest(&self.shared.context.lock()))
     }
     unsafe fn wait(
@@ -1041,3 +1143,9 @@ impl crate::Device<super::Api> for super::Device {
             .end_frame_capture(ptr::null_mut(), ptr::null_mut())
     }
 }
+
+// SAFE: WASM doesn't have threads
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for super::Device {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for super::Device {}

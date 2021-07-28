@@ -116,7 +116,11 @@ jobs:
       - name: check web
         if: matrix.kind == 'webgl'
         run: |
+          # Build for WebGPU
           cargo clippy --target ${{ matrix.target }} -p wgpu -- -D warnings
+
+          # Build for WebGPU+WebGL
+          cargo clippy --target ${{ matrix.target }} -p wgpu --features webgl -- -D warnings
 
           # build docs
           cargo doc --target ${{ matrix.target }} -p wgpu --no-deps

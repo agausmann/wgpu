@@ -58,6 +58,8 @@ To address this, we invalidate the vertex buffers based on:
 
 #[cfg(not(target_arch = "wasm32"))]
 mod egl;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 mod adapter;
 mod command;
@@ -67,6 +69,9 @@ mod queue;
 
 #[cfg(not(target_arch = "wasm32"))]
 use self::egl::{AdapterContext, Instance, Surface};
+
+#[cfg(target_arch = "wasm32")]
+use self::web::{AdapterContext, Instance, Surface};
 
 use arrayvec::ArrayVec;
 
@@ -122,6 +127,11 @@ bitflags::bitflags! {
         const MEMORY_BARRIERS = 1 << 2;
         /// Vertex buffer layouts separate from the data.
         const VERTEX_BUFFER_LAYOUT = 1 << 3;
+        /// Buffer map must emulated becuase it is not supported natively.
+        const EMULATE_BUFFER_MAP = 1 << 4;
+        /// Indicates that buffers used as ELEMENT_ARRAY_BUFFER may be created / initialized / used
+        /// as other targets, if not present they must not be mixed with other targets.
+        const INDEX_BUFFER_ROLE_CHANGE = 1 << 5;
     }
 }
 
@@ -163,6 +173,7 @@ struct TextureFormatDesc {
 struct AdapterShared {
     context: AdapterContext,
     private_caps: PrivateCapabilities,
+    downlevel_flags: wgt::DownlevelFlags,
     workarounds: Workarounds,
     shading_language_version: naga::back::glsl::Version,
 }
@@ -193,6 +204,7 @@ pub struct Queue {
     zero_buffer: glow::Buffer,
     temp_query_results: Vec<u64>,
     draw_buffer_count: u8,
+    current_index_buffer: Option<glow::Buffer>,
 }
 
 #[derive(Debug)]
@@ -201,7 +213,15 @@ pub struct Buffer {
     target: BindTarget,
     size: wgt::BufferAddress,
     map_flags: u32,
+    #[cfg(target_arch = "wasm32")]
+    emulate_map_allocation: std::cell::Cell<Option<*mut u8>>,
 }
+
+// Safe: WASM doesn't have threads
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for Buffer {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for Buffer {}
 
 #[derive(Clone, Debug)]
 enum TextureInner {
@@ -217,7 +237,14 @@ enum TextureInner {
 impl TextureInner {
     fn as_native(&self) -> (glow::Texture, BindTarget) {
         match *self {
-            Self::Renderbuffer { raw, .. } => panic!("Unexpected renderbuffer {}", raw),
+            #[cfg(not(target_arch = "wasm32"))] // Wasm renderbuffers don't impl Debug
+            Self::Renderbuffer { raw, .. } => {
+                panic!("Unexpected renderbuffer {}", raw);
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Renderbuffer { .. } => {
+                panic!("Unexpected renderbuffer");
+            }
             Self::Texture { raw, target } => (raw, target),
         }
     }
@@ -397,9 +424,21 @@ pub struct RenderPipeline {
     stencil: Option<StencilState>,
 }
 
+// SAFE: WASM doesn't have threads
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for RenderPipeline {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for RenderPipeline {}
+
 pub struct ComputePipeline {
     inner: PipelineInner,
 }
+
+// SAFE: WASM doesn't have threads
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for ComputePipeline {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for ComputePipeline {}
 
 #[derive(Debug)]
 pub struct QuerySet {
@@ -659,7 +698,7 @@ pub struct CommandBuffer {
     label: Option<String>,
     commands: Vec<Command>,
     data_bytes: Vec<u8>,
-    data_words: Vec<u32>,
+    data_words: Vec<glow::Query>,
 }
 
 //TODO: we would have something like `Arc<typed_arena::Arena>`

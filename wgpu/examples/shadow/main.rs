@@ -213,12 +213,36 @@ impl framework::Example for Example {
         wgpu::Features::DEPTH_CLAMPING
     }
 
+    fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        let downlevel_limits = wgpu::Limits::downlevel_defaults();
+        let webgl_limits = wgpu::Limits::downlevel_webgl2_defaults();
+        if adapter
+            .get_downlevel_properties()
+            .flags
+            .contains(wgpu::DownlevelFlags::STORAGE_RESOURCES)
+        {
+            wgpu::Limits {
+                max_storage_buffers_per_shader_stage: downlevel_limits
+                    .max_storage_buffers_per_shader_stage,
+                max_storage_buffer_binding_size: downlevel_limits.max_storage_buffer_binding_size,
+                ..webgl_limits
+            }
+        } else {
+            webgl_limits
+        }
+    }
+
     fn init(
         sc_desc: &wgpu::SwapChainDescriptor,
-        _adapter: &wgpu::Adapter,
+        adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
     ) -> Self {
+        let supports_storage_resources = adapter
+            .get_downlevel_properties()
+            .flags
+            .contains(wgpu::DownlevelFlags::STORAGE_RESOURCES);
+
         // Create the vertex and index buffers
         let vertex_size = mem::size_of::<Vertex>();
         let (cube_vertex_data, cube_index_data) = create_cube();
@@ -427,8 +451,11 @@ impl framework::Example for Example {
         let light_storage_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: light_uniform_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
+            usage: if supports_storage_resources {
+                wgpu::BufferUsages::STORAGE
+            } else {
+                wgpu::BufferUsages::UNIFORM
+            } | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -544,14 +571,18 @@ impl framework::Example for Example {
                             binding: 1, // lights
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                ty: if supports_storage_resources {
+                                    wgpu::BufferBindingType::Storage { read_only: true }
+                                } else {
+                                    wgpu::BufferBindingType::Uniform
+                                },
                                 has_dynamic_offset: false,
                                 min_binding_size: wgpu::BufferSize::new(light_uniform_size),
                             },
                             count: None,
                         },
                         wgpu::BindGroupLayoutEntry {
-                            binding: 2,
+                            binding: 3,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Texture {
                                 multisampled: false,
@@ -561,7 +592,7 @@ impl framework::Example for Example {
                             count: None,
                         },
                         wgpu::BindGroupLayoutEntry {
-                            binding: 3,
+                            binding: 4,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Sampler {
                                 comparison: true,
@@ -602,11 +633,11 @@ impl framework::Example for Example {
                         resource: light_storage_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
+                        binding: 3,
                         resource: wgpu::BindingResource::TextureView(&shadow_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 3,
+                        binding: 4,
                         resource: wgpu::BindingResource::Sampler(&shadow_sampler),
                     },
                 ],
@@ -624,7 +655,11 @@ impl framework::Example for Example {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_main",
+                    entry_point: if supports_storage_resources {
+                        "fs_main"
+                    } else {
+                        "fs_main_without_storage"
+                    },
                     targets: &[sc_desc.format.into()],
                 }),
                 primitive: wgpu::PrimitiveState {

@@ -251,14 +251,12 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
     ) where
         T: Iterator<Item = crate::BufferCopy>,
     {
-        //TODO: preserve `src.target` and `dst.target`
-        // at least for the buffers that require it.
         for copy in regions {
             self.cmd_buffer.commands.push(C::CopyBufferToBuffer {
                 src: src.raw,
-                src_target: glow::COPY_READ_BUFFER,
+                src_target: src.target,
                 dst: dst.raw,
-                dst_target: glow::COPY_WRITE_BUFFER,
+                dst_target: dst.target,
                 copy,
             })
         }
